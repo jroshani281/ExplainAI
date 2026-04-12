@@ -1,5 +1,5 @@
 // ---------- CONSTANTS ----------
-const TOTAL_CANDIDATES = 410377; // MHT-CET 2024 PCM registered candidates (official CET Cell data)
+//const TOTAL_CANDIDATES = 410377; // MHT-CET 2024 PCM registered candidates (official CET Cell data)
 
 // ---------- COLLEGE WEBSITE URLs ----------
 // Uses KEYWORD-based matching — no need for exact name.
