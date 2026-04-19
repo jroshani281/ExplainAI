@@ -215,8 +215,19 @@ def get_eligible_seat_types(category, gender):
     return seat_types
 
 
-with app.app_context():
-    db.create_all()
+def init_db():
+    """Create database tables when the app starts normally."""
+    with app.app_context():
+        db.create_all()
+
+
+@app.after_request
+def add_security_headers(response):
+    response.headers['X-Content-Type-Options'] = 'nosniff'
+    response.headers['X-Frame-Options'] = 'DENY'
+    response.headers['Referrer-Policy'] = 'no-referrer'
+    response.headers['Permissions-Policy'] = 'geolocation=()'
+    return response
 
 
 def get_session_user():
@@ -520,18 +531,19 @@ def _classify_chance(diff):
       Negative → user is BELOW cutoff  (risky)
 
     Thresholds:
-      High   : diff >= +2.0  (comfortably above — strong chance)
-      Medium : diff >= -2.0  (within ±2 pts — borderline, apply with backup)
-      Low    : diff <  -2.0  (below cutoff by more than 2 pts — reach option)
+      High   : diff >= 0.0   (at-or-above cutoff)
+      Medium : diff >= -2.0  (within 2 points below cutoff)
+      Low    : diff <  -2.0  (more than 2 points below cutoff)
 
-    NOTE: We use ±2.0 instead of the old ±0.5/+1.0 because MHT-CET cutoffs
-    can shift by 1–3 percentile points year-on-year.  The old narrow band
-    classified almost everything as "Low" at lower percentile ranges, making
-    the tool useless for SC/ST/OBC students with percentiles below 60.
+    This classification gives a practical balance between realistic cutoff
+    movement and reliable guidance for students across categories.
     """
-    if diff >= 0.0:    return "High"     # at or above cutoff = High
-    elif diff >= -2.0: return "Medium"   # up to 2 pts below = Medium  
-    else:              return "Low"      # more than 2 below = Low
+    if diff >= 0.0:
+        return "High"
+    elif diff >= -5.0:
+        return "Medium"   # realistic: cutoffs shift 3-8 pts year-to-year
+    else:
+        return "Low"
 
 
 def _build_explanation(percentile, cutoff, diff, seat_type, city, pref_city, chance):
@@ -620,7 +632,7 @@ def _select_best_colleges(deduped, percentile, total=30):
         cutoff = c.closing_percentile
         if cutoff <= 0: continue
         diff = percentile - cutoff
-        if diff < -5: continue   # only exclude colleges more than 5 pts below cutoff
+        if diff < -15: continue  # align with _count_eligible threshold
         tier = _classify_chance(diff)
         if   tier == 'High':   pool_h.append((c, cutoff, diff))
         elif tier == 'Medium': pool_m.append((c, cutoff, diff))
@@ -680,10 +692,11 @@ def _run_query(seat_types, pref_city, branches, college_types):
     # Base filters (city, branch, college type)
     def apply_filters(q):
         if pref_city and pref_city.lower() not in ('any city', 'any', '', 'all cities in maharashtra'):
-            # Split city into words and match any word — handles "Pune, Ambegaon" etc.
-            city_words = [w.strip() for w in pref_city.replace(',', ' ').split() if len(w.strip()) >= 3]
-            if city_words:
-                city_filters = [Cutoff.city.ilike(f'%{w}%') for w in city_words]
+            # Split on comma only — keeps multi-word city names intact (e.g. "Navi Mumbai").
+            # Splitting by space caused "Navi Mumbai" to also match plain Mumbai colleges.
+            city_parts = [p.strip() for p in pref_city.split(',') if len(p.strip()) >= 2]
+            if city_parts:
+                city_filters = [Cutoff.city.ilike(f'%{p}%') for p in city_parts]
                 q = q.filter(or_(*city_filters))
             else:
                 q = q.filter(Cutoff.city.ilike(f'%{pref_city}%'))
@@ -740,6 +753,7 @@ def recommend_colleges():
     gender        = data.get('gender', 'Male')
     pref_city     = (data.get('city', '') or '').strip()
     branches      = data.get('branches', [])
+    branch_labels = data.get('branchLabels', [])   # human-readable chip names for display
     college_types = data.get('collegeTypes', [])
 
     if percentile is None:
@@ -794,24 +808,78 @@ def recommend_colleges():
     # RULE: If the user selected a city, NEVER show colleges from other cities.
     # City is a hard filter. Only relax branch filter within the same city.
     # If no city selected, relax branch filter freely across Maharashtra.
-    filter_note = None
+    filter_note    = None
+    branch_relaxed = False
     MINIMUM_NEEDED = 20   # only applies when no city is selected
+    CITY_MINIMUM   = 5    # min results before relaxing branch filter within a city
 
     if pref_city:
-        # City is a hard filter — never override it.
-        # Only relax branch filter within this city if branch filter gave zero results.
+        # City is a HARD filter — never override it.
+        #
+        # Branch logic (3 cases):
+        #
+        # CASE A — eligible_strict >= CITY_MINIMUM:
+        #   User's branch + city gave enough results. Show them as-is. ✅
+        #
+        # CASE B — 0 < eligible_strict < CITY_MINIMUM:
+        #   User's branch gave SOME results but fewer than minimum.
+        #   → Show user's matching results FIRST (they asked for these).
+        #   → Then append extra branches from the same city to fill up,
+        #     with a warning banner and "Not your branch" tags on extras.
+        #
+        # CASE C — eligible_strict == 0:
+        #   User's branch gave ZERO results in this city.
+        #   → Show "no results" with a clear helpful message.
+        #     Do NOT silently show wrong branches.
+
         if branches and eligible_strict == 0:
+            # CASE C: zero results for user's branch — tell them clearly
             rows_city_any_branch = _run_query(all_seat_types, pref_city, [], college_types)
-            dedup_city_any = _deduplicate(rows_city_any_branch, percentile)
-            if _count_eligible(dedup_city_any, percentile) > 0:
-                raw_cutoffs = dedup_city_any
-                filter_note = (
-                    f"No colleges in {pref_city} offer your selected branches. "
-                    f"Showing all available branches in {pref_city} instead."
+            dedup_city_any       = _deduplicate(rows_city_any_branch, percentile)
+            city_any_count       = _count_eligible(dedup_city_any, percentile)
+            branch_names         = ', '.join(branches[:3]) + ('...' if len(branches) > 3 else '')
+            if city_any_count > 0:
+                hint = (
+                    f"No colleges in {pref_city} offer {branch_names} "
+                    f"for {category} category at {percentile:.2f} percentile. "
+                    f"However, {city_any_count} college(s) in {pref_city} have other branches available. "
+                    f"Go back and select 'All Maharashtra' or choose a different branch to see them."
                 )
             else:
-                raw_cutoffs = dedup_strict
+                hint = (
+                    f"No colleges found in {pref_city} for {category} category "
+                    f"at {percentile:.2f} percentile. "
+                    f"Try selecting 'All Maharashtra' to search statewide."
+                )
+            return jsonify({'status': 'no_results', 'total': 0, 'data': [], 'hint': hint})
+
+        elif branches and 0 < eligible_strict < CITY_MINIMUM:
+            # CASE B: some results but fewer than minimum.
+            # Show user's own matches first, then pad with other branches.
+            rows_city_any_branch = _run_query(all_seat_types, pref_city, [], college_types)
+            dedup_city_any       = _deduplicate(rows_city_any_branch, percentile)
+
+            # Build merged list: user's matches first, then extras (different branch)
+            user_match_keys = {(c.college_name, c.branch) for c in dedup_strict}
+            merged = list(dedup_strict)  # user's actual branch matches — shown first
+            for c in dedup_city_any:
+                key = (c.college_name, c.branch)
+                if key not in user_match_keys:
+                    merged.append(c)
+
+            raw_cutoffs    = merged
+            branch_relaxed = True
+            # Use human-readable chip labels if available, fall back to raw branch names
+            display_names  = branch_labels if branch_labels else branches
+            branch_names   = ', '.join(display_names[:3]) + ('...' if len(display_names) > 3 else '')
+            filter_note    = (
+                f" Only {eligible_strict} college(s) in {pref_city} offer your "
+                f"selected branch(es) ({branch_names}). They are shown first below. Additional branches "
+                f"from {pref_city} are also included — these are tagged ' Not your branch'."
+            )
+
         else:
+            # CASE A: enough results for user's branch — show them as-is
             raw_cutoffs = dedup_strict
     else:
         # No city selected — relax branch filter across Maharashtra if needed
@@ -866,9 +934,20 @@ def recommend_colleges():
             r['seat_type'], r.get('city', ''), pref_city, r['chance']
         )
 
-    # Sort: High first, then Medium, then Low; within each tier by cutoff desc
+    # Sort: High → Medium → Low.
+    # When branch was relaxed, within each tier put user's matching branches FIRST,
+    # then extras (tagged "Not your branch") — so user sees their choice at the top.
+    user_branches_lower = [b.lower() for b in branches] if branches else []
+
+    def _is_user_branch(college_branch):
+        if not user_branches_lower:
+            return True
+        bl = (college_branch or '').lower()
+        return any(bl in ub or ub in bl for ub in user_branches_lower)
+
     results.sort(key=lambda x: (
         {'High': 0, 'Medium': 1, 'Low': 2}.get(x['chance'], 3),
+        0 if _is_user_branch(x['branch']) else 1,   # user's branch first within tier
         -x['cutoff_percentile']
     ))
 
@@ -876,7 +955,8 @@ def recommend_colleges():
         'status': 'success',
         'total': len(results),
         'data': results,
-        'filter_note': filter_note
+        'filter_note':    filter_note,
+        'branch_relaxed': branch_relaxed
     })
 
 
@@ -1056,4 +1136,5 @@ def undo_dislike_scholarship():
 
 
 if __name__ == '__main__':
+    init_db()
     app.run(debug=True)

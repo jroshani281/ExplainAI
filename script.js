@@ -1330,12 +1330,21 @@ async function handleCounselingSubmit(e) {
     const finalPercentile = parseFloat(document.getElementById('percentile').value);
     sessionStorage.setItem('inputPercentile', finalPercentile);
 
+    // Collect human-readable chip labels (e.g. "Computer Engineering") separately
+    // from the raw DB branch variants stored in data-branches.
+    // The backend uses branchLabels for the user-facing warning banner.
+    const branchLabels = [];
+    document.querySelectorAll('#branch-chips .chip.selected').forEach(function(chip) {
+        branchLabels.push(chip.textContent.trim());
+    });
+
     const formData = {
         percentile: finalPercentile,
         category: document.getElementById('category').value,
         gender: document.getElementById('counselingGender').value,
         city: document.getElementById('city').value,
         branches: getSelectedChips('#branch-chips .chip.selected'),
+        branchLabels: branchLabels,
         collegeTypes: (function() {
             var total  = document.querySelectorAll('#college-type-chips .chip').length;
             var sel    = document.querySelectorAll('#college-type-chips .chip.selected').length;
@@ -1348,16 +1357,17 @@ async function handleCounselingSubmit(e) {
     // Save category and city AFTER formData is built so results header shows correct values
     sessionStorage.setItem('inputCategory', formData.category);
     sessionStorage.setItem('inputCity', formData.city);
+    sessionStorage.setItem('inputBranches', JSON.stringify(formData.branches || []));
 
     try {
-        const response = await fetch('http://127.0.0.1:5000/api/recommend/colleges', {
+        const response = await fetch(`${API_BASE}/api/recommend/colleges`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(formData)
         });
         const result = await response.json();
         if (result.status === 'success') {
-            renderCollegeResults(result.data, result.filter_note || null, null);
+            renderCollegeResults(result.data, result.filter_note || null, null, result.branch_relaxed || false);
             showPage('results-counseling');
         } else if (result.status === 'no_results') {
             renderCollegeResults([], null, result.hint || null);
@@ -1375,7 +1385,7 @@ async function handleCounselingSubmit(e) {
 }
 
 // ---------- RENDER COLLEGE RESULTS — shows ALL colleges by default ----------
-function renderCollegeResults(colleges, filterNote, noResultsHint) {
+function renderCollegeResults(colleges, filterNote, noResultsHint, branchRelaxed) {
     var grid     = document.getElementById('resultsGrid');
     var countEl  = document.getElementById('resultsCount');
     var emptyEl  = document.getElementById('resEmpty');
@@ -1388,13 +1398,18 @@ function renderCollegeResults(colleges, filterNote, noResultsHint) {
     if (bannerEl) bannerEl.style.display = 'none';
 
     // Show/hide the filter info notice
+    // If branch was relaxed, show as prominent orange warning — not just small blue note
     var noteEl = document.getElementById('resFilterNote');
     if (noteEl) {
         if (filterNote) {
             noteEl.textContent = filterNote;
             noteEl.style.display = '';
+            noteEl.className = branchRelaxed
+                ? 'res-filter-note res-filter-note--warning'
+                : 'res-filter-note';
         } else {
             noteEl.style.display = 'none';
+            noteEl.className = 'res-filter-note';
         }
     }
 
@@ -1468,6 +1483,9 @@ function _renderCards(grid, list) {
         return !disliked.includes(colKey);
     });
 
+    // Read which branches the user originally selected
+    var userSelectedBranches = JSON.parse(sessionStorage.getItem('inputBranches') || '[]');
+
     filtered.forEach(function(col, idx) {
         var card   = document.createElement('div');
         var chance = col.chance || 'Low';
@@ -1477,6 +1495,16 @@ function _renderCards(grid, list) {
 
         var name   = col.college_name      || 'Unknown College';
         var branch = col.branch            || '';
+
+        // Detect if this card's branch was NOT what the user selected
+        var isBranchMismatch = false;
+        if (userSelectedBranches.length > 0) {
+            var branchLower = branch.toLowerCase();
+            isBranchMismatch = !userSelectedBranches.some(function(b) {
+                return branchLower.indexOf(b.toLowerCase()) !== -1
+                    || b.toLowerCase().indexOf(branchLower) !== -1;
+            });
+        }
         // City: take last part after comma if college name contains city
         var rawCity = col.city || '';
         var city   = rawCity.split(',').pop().trim();
@@ -1541,10 +1569,11 @@ function _renderCards(grid, list) {
             '<div class="rc-card-top">' +
                 '<div class="rc-num">' + (idx + 1) + '</div>' +
                 '<div class="rc-badge rc-badge-' + chLow + '">' + chanceLabel + '</div>' +
+                (isBranchMismatch ? '<div class="rc-branch-warn-tag">&#9888; Not your branch</div>' : '') +
             '</div>' +
             '<div class="rc-body">' +
                 '<div class="rc-name">' + name + '</div>' +
-                '<div class="rc-branch">' + branch + '</div>' +
+                '<div class="rc-branch' + (isBranchMismatch ? ' rc-branch--mismatch' : '') + '">' + branch + '</div>' +
                 '<div class="rc-meta-row">' +
                     (city  ? '<span class="rc-meta-item">' + city + '</span>' : '') +
                     (ctype ? '<span class="rc-meta-item rc-meta-type">' + ctype + '</span>' : '') +
@@ -1864,13 +1893,10 @@ async function handleScholarshipSubmit(e) {
     };
 
     try {
-        const res = await fetch('http://localhost:5000/api/recommend/scholarships', {
+        const res = await fetch(`${API_BASE}/api/recommend/scholarships`, {
             method: 'POST',
             credentials: 'include',
-            headers: {
-                'Content-Type': 'application/json',
-                'X-User-Id': localStorage.getItem('user_id') || ''
-            },
+            headers: Object.assign({ 'Content-Type': 'application/json' }, _authHeaders()),
             body: JSON.stringify(formData)
         });
         const json = await res.json();
@@ -2162,7 +2188,8 @@ document.addEventListener('DOMContentLoaded', function() {
 
     if (menuToggle) {
         menuToggle.addEventListener('click', () => {
-            navLinks.classList.toggle('open');
+            const isOpen = navLinks.classList.toggle('open');
+            menuToggle.setAttribute('aria-expanded', String(isOpen));
         });
     }
 

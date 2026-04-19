@@ -3164,3 +3164,35 @@ input:disabled {
 @media (max-width: 600px) {
   .res-download-btn { width: 100%; justify-content: center; }
 }
+/* ── Branch relaxation warning styles ──────────────────────────────────────── */
+.res-filter-note--warning {
+    background: #fff7ed;
+    border: 1px solid #fed7aa;
+    border-left: 4px solid #ea580c;
+    color: #9a3412;
+    font-size: 14px;
+    font-weight: 600;
+    padding: 14px 18px;
+    border-radius: 8px;
+    margin-bottom: 16px;
+    line-height: 1.6;
+}
+
+/* "⚠ Not your branch" tag on result card header */
+.rc-branch-warn-tag {
+    margin-left: auto;
+    background: #fff7ed;
+    color: #c2410c;
+    border: 1px solid #fed7aa;
+    border-radius: 20px;
+    font-size: 11px;
+    font-weight: 700;
+    padding: 3px 10px;
+    white-space: nowrap;
+}
+
+/* Branch name in orange-red when it does not match user's selection */
+.rc-branch--mismatch {
+    color: #c2410c !important;
+    font-style: italic;
+}
