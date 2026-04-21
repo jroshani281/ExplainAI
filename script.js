@@ -1464,6 +1464,7 @@ function renderCollegeResults(colleges, filterNote, noResultsHint, branchRelaxed
 
     // *** Show ALL colleges — no artificial 20 cap ***
     _renderCards(grid, colleges);
+    _loadInsights(grid);
 
     // Update dashboard stats
     updateDashboardStats();
@@ -1565,6 +1566,12 @@ function _renderCards(grid, list) {
         var cutoffPct = Math.min(100, (cutoffNum / barMax) * 100).toFixed(1);
         var userPctBar = Math.min(100, (userPct / barMax) * 100).toFixed(1);
 
+        // Store data for prediction + trend fetch
+        card.dataset.college  = name;
+        card.dataset.branch   = branch;
+        card.dataset.seatType = seat;
+        card.dataset.cardIdx  = idx;
+
         card.innerHTML =
             '<div class="rc-card-top">' +
                 '<div class="rc-num">' + (idx + 1) + '</div>' +
@@ -1577,6 +1584,13 @@ function _renderCards(grid, list) {
                 '<div class="rc-meta-row">' +
                     (city  ? '<span class="rc-meta-item">' + city + '</span>' : '') +
                     (ctype ? '<span class="rc-meta-item rc-meta-type">' + ctype + '</span>' : '') +
+                '</div>' +
+                '<div class="rc-cutoff-row">' +
+                    '<span class="rc-cutoff-label">2025 cutoff</span>' +
+                    '<span class="rc-cutoff-val">' + (cutoffNum > 0 ? cutoffNum.toFixed(2) : '—') + '</span>' +
+                '</div>' +
+                '<div class="rc-insight-row" id="rc-insight-' + idx + '">' +
+                    '<span class="rc-insight-loading">Loading predictions...</span>' +
                 '</div>' +
             '</div>' +
             '<div class="rc-footer">' +
@@ -1642,6 +1656,76 @@ function _renderCards(grid, list) {
         actionsDiv.appendChild(dislikeBtn);
 
         grid.appendChild(card);
+    });
+}
+
+// ── Prediction + Round-trend badges ──────────────────────────────────────────
+// Fetches BOTH the 2026 prediction AND the round-to-round trend for each card.
+// Runs after _renderCards so cards already exist in the DOM.
+function _loadInsights(grid) {
+    var cards = grid.querySelectorAll('.result-card[data-college]');
+    if (!cards.length) return;
+
+    cards.forEach(function(card) {
+        var idx      = card.dataset.cardIdx;
+        var college  = card.dataset.college  || '';
+        var branch   = card.dataset.branch   || '';
+        var seatType = card.dataset.seatType || '';
+        var insightEl = document.getElementById('rc-insight-' + idx);
+        if (!insightEl) return;
+
+        var BASE = 'http://localhost:5000';
+        var predUrl  = BASE + '/api/predict/2026?college='  + encodeURIComponent(college)
+                            + '&branch='     + encodeURIComponent(branch)
+                            + '&seat_type='  + encodeURIComponent(seatType);
+        var trendUrl = BASE + '/api/trend/rounds?college='  + encodeURIComponent(college)
+                            + '&branch='     + encodeURIComponent(branch)
+                            + '&seat_type='  + encodeURIComponent(seatType);
+
+        // Fetch both in parallel
+        Promise.all([
+            fetch(predUrl).then(function(r){ return r.json(); }).catch(function(){ return null; }),
+            fetch(trendUrl).then(function(r){ return r.json(); }).catch(function(){ return null; })
+        ]).then(function(results) {
+            var pred  = results[0];
+            var trend = results[1];
+            var html  = '';
+
+            // ── Prediction badge ──────────────────────────────────────────
+            if (pred && pred.status === 'success') {
+                var pct    = parseFloat(pred.predicted_2026).toFixed(2);
+                var conf   = pred.confidence || '';
+                var dir    = pred.trend_direction || 'stable';
+                var arrow  = dir === 'rising'  ? ' &#8679;' :
+                             dir === 'falling' ? ' &#8681;' : '';
+                var cCls   = conf === 'High'   ? 'rc-conf-high' :
+                             conf === 'Medium' ? 'rc-conf-med'  : 'rc-conf-low';
+                html += '<div class="rc-pred-row">'
+                      +   '<span class="rc-pred-label">Predicted 2026</span>'
+                      +   '<span class="rc-pred-val">' + pct + arrow + '</span>'
+                      +   '<span class="rc-pred-conf ' + cCls + '">' + conf + '</span>'
+                      + '</div>';
+            }
+
+            // ── Round-trend badge ─────────────────────────────────────────
+            if (trend && trend.status === 'success' && trend.avg_r1_to_final_drop !== undefined) {
+                var drop    = parseFloat(trend.avg_r1_to_final_drop);
+                var absDrop = Math.abs(drop).toFixed(1);
+                var advice  = trend.advice || '';
+                if (advice) {
+                    var trendCls = drop < -0.5 ? 'rc-trend-good' :
+                                   drop >  0.5 ? 'rc-trend-warn' : 'rc-trend-stable';
+                    var trendIcon = drop < -0.5 ? '&#8675;' :
+                                    drop >  0.5 ? '&#8673;' : '&#8596;';
+                    html += '<div class="rc-trend-row ' + trendCls + '">'
+                          +   '<span class="rc-trend-icon">' + trendIcon + '</span>'
+                          +   '<span class="rc-trend-text">' + advice + '</span>'
+                          + '</div>';
+                }
+            }
+
+            insightEl.innerHTML = html || '';
+        });
     });
 }
 
@@ -1727,6 +1811,7 @@ function filterResults(btn, level) {
     }
 
     _renderCards(grid, list);
+    _loadInsights(grid);
 }
 
 function _setFilterCounts(total, high, med, low) {
