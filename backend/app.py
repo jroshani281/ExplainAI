@@ -774,6 +774,11 @@ def recommend_colleges():
     rows_strict   = _run_query(all_seat_types, pref_city, branches, college_types)
     dedup_strict  = _deduplicate(rows_strict, percentile)
     eligible_strict = _count_eligible(dedup_strict, percentile)
+    # Count unique colleges (not seat_type rows) for accurate CASE B trigger
+    unique_colleges_strict = len(set(
+        (c.college_name, c.branch) for c in dedup_strict
+        if (percentile - c.closing_percentile) >= -15
+    ))
     user_set_type_filter = bool(college_types)
 
     # If user set a college-type filter and got nothing, tell them why
@@ -832,7 +837,7 @@ def recommend_colleges():
         #   → Show "no results" with a clear helpful message.
         #     Do NOT silently show wrong branches.
 
-        if branches and eligible_strict == 0:
+        if branches and unique_colleges_strict == 0:
             # CASE C: zero results for user's branch — tell them clearly
             rows_city_any_branch = _run_query(all_seat_types, pref_city, [], college_types)
             dedup_city_any       = _deduplicate(rows_city_any_branch, percentile)
@@ -853,8 +858,8 @@ def recommend_colleges():
                 )
             return jsonify({'status': 'no_results', 'total': 0, 'data': [], 'hint': hint})
 
-        elif branches and 0 < eligible_strict < CITY_MINIMUM:
-            # CASE B: some results but fewer than minimum.
+        elif branches and 0 < unique_colleges_strict < CITY_MINIMUM:
+            # CASE B: fewer unique colleges than minimum — pad with other branches.
             # Show user's own matches first, then pad with other branches.
             rows_city_any_branch = _run_query(all_seat_types, pref_city, [], college_types)
             dedup_city_any       = _deduplicate(rows_city_any_branch, percentile)
@@ -872,10 +877,16 @@ def recommend_colleges():
             # Use human-readable chip labels if available, fall back to raw branch names
             display_names  = branch_labels if branch_labels else branches
             branch_names   = ', '.join(display_names[:3]) + ('...' if len(display_names) > 3 else '')
-            filter_note    = (
-                f" Only {eligible_strict} college(s) in {pref_city} offer your "
-                f"selected branch(es) ({branch_names}). They are shown first below. Additional branches "
-                f"from {pref_city} are also included — these are tagged ' Not your branch'."
+            # Count what _select_best_colleges will ACTUALLY show as user-branch cards.
+            # Run selection on ONLY the user's branch matches (dedup_strict) to get
+            # the real number — this matches exactly what appears in the results list.
+            user_branch_results = _select_best_colleges(list(dedup_strict), percentile, total=30)
+            cards_shown = len(user_branch_results)
+            filter_note = (
+                f' Only {cards_shown} college(s) in {pref_city} offer'
+                f' {branch_names} within your score range'
+                f" — shown first below. Other branches from {pref_city}"
+                f" are also listed and tagged \u2019 Not your branch\u2019."
             )
 
         else:
@@ -1271,10 +1282,14 @@ def round_trend():
     avg_drop = round(sum(r1_to_r3_drops) / len(r1_to_r3_drops), 2) if r1_to_r3_drops else 0
 
     advice = ''
-    if avg_drop < -1.0:
-        advice = f'Cutoff drops avg {abs(avg_drop):.1f} pts from Round 1 to final — if you miss Round 1, apply in Round 2.'
+    abs_avg = abs(avg_drop)
+    # Sanity: ignore advice if avg drop > 15 pts (bad/sparse data)
+    if abs_avg > 15.0:
+        advice = 'Cutoff is stable across rounds — apply in any round.'
+    elif avg_drop < -1.0:
+        advice = f'Cutoff drops avg {abs_avg:.1f} pts from Round 1 to final — if you miss Round 1, apply in Round 2.'
     elif avg_drop > 1.0:
-        advice = f'Cutoff rises avg {avg_drop:.1f} pts from Round 1 to final — Round 1 is your best chance.'
+        advice = f'Cutoff rises avg {abs_avg:.1f} pts from Round 1 to final — Round 1 is your best chance.'
     else:
         advice = 'Cutoff is stable across rounds — apply in any round.'
 

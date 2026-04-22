@@ -1438,20 +1438,32 @@ function renderCollegeResults(colleges, filterNote, noResultsHint, branchRelaxed
         else                      allLow.push(c);
     });
 
-    // Store on grid for filter buttons to use
+    // Store on grid for filter buttons to use (store full lists, _renderCards handles disliked filtering)
     grid._allHigh = allHigh;
     grid._allMed  = allMed;
     grid._allLow  = allLow;
     grid._all     = colleges;
+    grid._visHigh = visHigh;
+    grid._visMed  = visMed;
+    grid._visLow  = visLow;
 
-    // Update all counts
-    _setFilterCounts(colleges.length, allHigh.length, allMed.length, allLow.length);
+    // Update counts based on VISIBLE colleges (excluding disliked — matches what _renderCards actually shows)
+    var dislikedNow = _getDisliked();
+    var visibleColleges = colleges.filter(function(col) {
+        var colKey = ((col.college_name||'')+'__'+(col.branch||'')).replace(/\s+/g,'_').toLowerCase().substring(0,80);
+        return !dislikedNow.includes(colKey);
+    });
+    var visHigh = visibleColleges.filter(function(c){ return (c.chance||'').toLowerCase()==='high'; });
+    var visMed  = visibleColleges.filter(function(c){ return (c.chance||'').toLowerCase()==='medium'; });
+    var visLow  = visibleColleges.filter(function(c){ return (c.chance||'').toLowerCase()==='low'; });
+
+    _setFilterCounts(visibleColleges.length, visHigh.length, visMed.length, visLow.length);
 
     // Heading
-    if (countEl) countEl.textContent = colleges.length + ' College Recommendation' + (colleges.length !== 1 ? 's' : '') + ' Found';
+    if (countEl) countEl.textContent = visibleColleges.length + ' College Recommendation' + (visibleColleges.length !== 1 ? 's' : '') + ' Found';
 
     // Showing text
-    if (showEl) showEl.textContent = 'All ' + colleges.length + ' colleges listed below';
+    if (showEl) showEl.textContent = 'All ' + visibleColleges.length + ' colleges listed below';
     var dlBtn = document.getElementById('resDownloadBtn');
     if (dlBtn) dlBtn.style.display = colleges.length > 0 ? '' : 'none';
 
@@ -1693,26 +1705,35 @@ function _loadInsights(grid) {
 
             // ── Prediction badge ──────────────────────────────────────────
             if (pred && pred.status === 'success') {
-                var pct    = parseFloat(pred.predicted_2026).toFixed(2);
-                var conf   = pred.confidence || '';
-                var dir    = pred.trend_direction || 'stable';
-                var arrow  = dir === 'rising'  ? ' &#8679;' :
-                             dir === 'falling' ? ' &#8681;' : '';
+                var predVal  = parseFloat(pred.predicted_2026);
+                var pct      = predVal.toFixed(2);
+                var conf     = pred.confidence || '';
+                // Arrow: compare predicted 2026 vs 2025 actual cutoff on card
+                var actual2025 = parseFloat(card.querySelector('.rc-cutoff-val') ?
+                                   card.querySelector('.rc-cutoff-val').textContent : '0') || 0;
+                var diff2026   = predVal - actual2025;
+                // Only show arrow if change is meaningful (>0.5 pts)
+                var arrow = diff2026 >  0.5 ? ' &#8679;' :
+                            diff2026 < -0.5 ? ' &#8681;' : '';
+                // Confidence label: rename so students don't confuse with admission chance
+                var confLabel = conf === 'High'   ? 'Est. accuracy: High' :
+                                conf === 'Medium' ? 'Est. accuracy: Med'  : 'Est. accuracy: Low';
                 var cCls   = conf === 'High'   ? 'rc-conf-high' :
                              conf === 'Medium' ? 'rc-conf-med'  : 'rc-conf-low';
                 html += '<div class="rc-pred-row">'
                       +   '<span class="rc-pred-label">Predicted 2026</span>'
                       +   '<span class="rc-pred-val">' + pct + arrow + '</span>'
-                      +   '<span class="rc-pred-conf ' + cCls + '">' + conf + '</span>'
+                      +   '<span class="rc-pred-conf ' + cCls + '" title="' + confLabel + '">' + conf + '</span>'
                       + '</div>';
             }
 
-            // ── Round-trend badge ─────────────────────────────────────────
+            // ── Round-trend badge (only show if drop is realistic: ≤15 pts) ─
             if (trend && trend.status === 'success' && trend.avg_r1_to_final_drop !== undefined) {
                 var drop    = parseFloat(trend.avg_r1_to_final_drop);
-                var absDrop = Math.abs(drop).toFixed(1);
+                var absDrop = Math.abs(drop);
                 var advice  = trend.advice || '';
-                if (advice) {
+                // Sanity check: ignore unrealistic trends (>15 pts = bad data)
+                if (advice && absDrop <= 15.0) {
                     var trendCls = drop < -0.5 ? 'rc-trend-good' :
                                    drop >  0.5 ? 'rc-trend-warn' : 'rc-trend-stable';
                     var trendIcon = drop < -0.5 ? '&#8675;' :
