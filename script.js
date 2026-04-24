@@ -965,6 +965,19 @@ function filterActive(el) {
     el.classList.add('active');
 }
 
+// ---------- ROUND CHIP SELECTOR ----------
+function selectRoundChip(el) {
+    document.querySelectorAll('#round-chips .cc-round-chip').forEach(function(c) {
+        c.classList.remove('cc-round-selected');
+    });
+    el.classList.add('cc-round-selected');
+}
+
+function getSelectedRound() {
+    var sel = document.querySelector('#round-chips .cc-round-selected');
+    return sel ? parseInt(sel.dataset.round, 10) : 1;
+}
+
 // ---------- LIKE / DISLIKE ----------
 // User-scoped storage keys — prevents one user's data showing for another user
 function _userStorageKey(base) {
@@ -1338,11 +1351,14 @@ async function handleCounselingSubmit(e) {
         branchLabels.push(chip.textContent.trim());
     });
 
+    const selectedRound = getSelectedRound();
+
     const formData = {
         percentile: finalPercentile,
         category: document.getElementById('category').value,
         gender: document.getElementById('counselingGender').value,
         city: document.getElementById('city').value,
+        round: selectedRound,
         branches: getSelectedChips('#branch-chips .chip.selected'),
         branchLabels: branchLabels,
         collegeTypes: (function() {
@@ -1357,6 +1373,7 @@ async function handleCounselingSubmit(e) {
     // Save category and city AFTER formData is built so results header shows correct values
     sessionStorage.setItem('inputCategory', formData.category);
     sessionStorage.setItem('inputCity', formData.city);
+    sessionStorage.setItem('inputRound', selectedRound);
     sessionStorage.setItem('inputBranches', JSON.stringify(formData.branches || []));
 
     try {
@@ -1584,26 +1601,23 @@ function _renderCards(grid, list) {
         card.dataset.seatType = seat;
         card.dataset.cardIdx  = idx;
 
+        var selectedRound = sessionStorage.getItem('inputRound') || '1';
         card.innerHTML =
             '<div class="rc-card-top">' +
                 '<div class="rc-num">' + (idx + 1) + '</div>' +
                 '<div class="rc-badge rc-badge-' + chLow + '">' + chanceLabel + '</div>' +
-                (isBranchMismatch ? '<div class="rc-branch-warn-tag">&#9888; Not your branch</div>' : '') +
             '</div>' +
             '<div class="rc-body">' +
                 '<div class="rc-name">' + name + '</div>' +
-                '<div class="rc-branch' + (isBranchMismatch ? ' rc-branch--mismatch' : '') + '">' + branch + '</div>' +
+                '<div class="rc-branch">' + branch + '</div>' +
                 '<div class="rc-meta-row">' +
                     (city  ? '<span class="rc-meta-item">' + city + '</span>' : '') +
                     (ctype ? '<span class="rc-meta-item rc-meta-type">' + ctype + '</span>' : '') +
                 '</div>' +
-                '<div class="rc-cutoff-row">' +
-                    '<span class="rc-cutoff-label">2025 cutoff</span>' +
-                    '<span class="rc-cutoff-val">' + (cutoffNum > 0 ? cutoffNum.toFixed(2) : '—') + '</span>' +
-                '</div>' +
-                '<div class="rc-insight-row" id="rc-insight-' + idx + '">' +
-                    '<span class="rc-insight-loading">Loading predictions...</span>' +
-                '</div>' +
+                (cutoffNum > 0 ? '<div class="rc-cutoff-row">' +
+                    '<span class="rc-cutoff-label">Cutoff (Round ' + selectedRound + ', 2025)</span>' +
+                    '<span class="rc-cutoff-val">' + cutoffNum.toFixed(2) + '</span>' +
+                '</div>' : '') +
             '</div>' +
             '<div class="rc-footer">' +
                 '<div class="rc-actions"></div>' +
@@ -1619,6 +1633,18 @@ function _renderCards(grid, list) {
         whyBtn.addEventListener('click', function() { openModal(this.getAttribute('data-mkey')); });
         actionsDiv.appendChild(whyBtn);
 
+        // Trend & Prediction button
+        var trendBtn = document.createElement('button');
+        trendBtn.className = 'rc-trend-btn';
+        trendBtn.innerHTML = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg> Trend & Prediction';
+        trendBtn.dataset.college  = name;
+        trendBtn.dataset.branch   = branch;
+        trendBtn.dataset.seatType = seat;
+        trendBtn.addEventListener('click', function() {
+            openTrendDrawer(this.dataset.college, this.dataset.branch, this.dataset.seatType);
+        });
+        actionsDiv.appendChild(trendBtn);
+
         // Visit Website button
         var websiteBtn = document.createElement('a');
         websiteBtn.href = getCollegeUrl(name);
@@ -1628,7 +1654,7 @@ function _renderCards(grid, list) {
         websiteBtn.textContent = 'Visit Website';
         actionsDiv.appendChild(websiteBtn);
 
-        // Save button — text only, no emoji
+        // Save button
         var likeBtn = document.createElement('button');
         likeBtn.className = 'rc-like' + (isLiked ? ' active-like' : '');
         likeBtn.textContent = isLiked ? 'Saved' : 'Save';
@@ -1643,7 +1669,7 @@ function _renderCards(grid, list) {
         });
         actionsDiv.appendChild(likeBtn);
 
-        // Not Interested button — text only, no emoji
+        // Not Interested button
         var dislikeBtn = document.createElement('button');
         dislikeBtn.className = 'rc-dislike' + (isDisliked ? ' active-dislike' : '');
         dislikeBtn.textContent = isDisliked ? 'Removed' : 'Not Interested';
@@ -1655,7 +1681,6 @@ function _renderCards(grid, list) {
         dislikeBtn.addEventListener('click', function() {
             var c = this.closest('.result-card');
             toggleDislike(this, this.dataset.colKey, this.dataset.colName, this.dataset.colBranch);
-            // Hide the card immediately so student no longer sees it
             if (c) {
                 c.style.transition = 'opacity 0.25s';
                 c.style.opacity = '0';
@@ -1671,84 +1696,199 @@ function _renderCards(grid, list) {
     });
 }
 
-// ── Prediction + Round-trend badges ──────────────────────────────────────────
-// Fetches BOTH the 2026 prediction AND the round-to-round trend for each card.
-// Runs after _renderCards so cards already exist in the DOM.
-function _loadInsights(grid) {
-    var cards = grid.querySelectorAll('.result-card[data-college]');
-    if (!cards.length) return;
+// ── Trend & Prediction Drawer ─────────────────────────────────────────────────
+function openTrendDrawer(college, branch, seatType) {
+    var overlay = document.getElementById('trendDrawerOverlay');
+    var body    = document.getElementById('tpBody');
+    var meta    = document.getElementById('tpMeta');
+    if (!overlay) return;
 
-    cards.forEach(function(card) {
-        var idx      = card.dataset.cardIdx;
-        var college  = card.dataset.college  || '';
-        var branch   = card.dataset.branch   || '';
-        var seatType = card.dataset.seatType || '';
-        var insightEl = document.getElementById('rc-insight-' + idx);
-        if (!insightEl) return;
+    meta.innerHTML = '<span class="tp-meta-college">' + college + '</span>'
+                   + '<span class="tp-meta-sep"> · </span>'
+                   + '<span class="tp-meta-branch">' + branch + '</span>'
+                   + '<span class="tp-meta-sep"> · </span>'
+                   + '<span class="tp-meta-seat">' + seatType + '</span>';
+    body.innerHTML = '<div class="tp-loading">Loading trend data…</div>';
+    overlay.classList.add('tp-open');
+    document.body.style.overflow = 'hidden';
 
-        var BASE = 'http://localhost:5000';
-        var predUrl  = BASE + '/api/predict/2026?college='  + encodeURIComponent(college)
-                            + '&branch='     + encodeURIComponent(branch)
-                            + '&seat_type='  + encodeURIComponent(seatType);
-        var trendUrl = BASE + '/api/trend/rounds?college='  + encodeURIComponent(college)
-                            + '&branch='     + encodeURIComponent(branch)
-                            + '&seat_type='  + encodeURIComponent(seatType);
+    var BASE = typeof API_BASE !== 'undefined' ? API_BASE : 'http://localhost:5000';
+    var predUrl  = BASE + '/api/predict/2026?college='  + encodeURIComponent(college)
+                        + '&branch='    + encodeURIComponent(branch)
+                        + '&seat_type=' + encodeURIComponent(seatType);
+    var trendUrl = BASE + '/api/trend/rounds?college='  + encodeURIComponent(college)
+                        + '&branch='    + encodeURIComponent(branch)
+                        + '&seat_type=' + encodeURIComponent(seatType);
 
-        // Fetch both in parallel
-        Promise.all([
-            fetch(predUrl).then(function(r){ return r.json(); }).catch(function(){ return null; }),
-            fetch(trendUrl).then(function(r){ return r.json(); }).catch(function(){ return null; })
-        ]).then(function(results) {
-            var pred  = results[0];
-            var trend = results[1];
-            var html  = '';
+    Promise.all([
+        fetch(predUrl).then(function(r){ return r.json(); }).catch(function(){ return null; }),
+        fetch(trendUrl).then(function(r){ return r.json(); }).catch(function(){ return null; })
+    ]).then(function(results) {
+        var pred  = results[0];
+        var trend = results[1];
+        var html  = '';
+        var selectedRound = parseInt(sessionStorage.getItem('inputRound') || '1', 10);
 
-            // ── Prediction badge ──────────────────────────────────────────
-            if (pred && pred.status === 'success') {
-                var predVal  = parseFloat(pred.predicted_2026);
-                var pct      = predVal.toFixed(2);
-                var conf     = pred.confidence || '';
-                // Arrow: compare predicted 2026 vs 2025 actual cutoff on card
-                var actual2025 = parseFloat(card.querySelector('.rc-cutoff-val') ?
-                                   card.querySelector('.rc-cutoff-val').textContent : '0') || 0;
-                var diff2026   = predVal - actual2025;
-                // Only show arrow if change is meaningful (>0.5 pts)
-                var arrow = diff2026 >  0.5 ? ' &#8679;' :
-                            diff2026 < -0.5 ? ' &#8681;' : '';
-                // Confidence label: rename so students don't confuse with admission chance
-                var confLabel = conf === 'High'   ? 'Est. accuracy: High' :
-                                conf === 'Medium' ? 'Est. accuracy: Med'  : 'Est. accuracy: Low';
-                var cCls   = conf === 'High'   ? 'rc-conf-high' :
-                             conf === 'Medium' ? 'rc-conf-med'  : 'rc-conf-low';
-                html += '<div class="rc-pred-row">'
-                      +   '<span class="rc-pred-label">Predicted 2026</span>'
-                      +   '<span class="rc-pred-val">' + pct + arrow + '</span>'
-                      +   '<span class="rc-pred-conf ' + cCls + '" title="' + confLabel + '">' + conf + '</span>'
-                      + '</div>';
+        // ── SECTION 1: Year-over-year same-round cutoffs ──────────────────
+        html += '<div class="tp-section-title">Year-by-Year Cutoff (Round ' + selectedRound + ')</div>';
+        html += '<p class="tp-section-note">How the Round ' + selectedRound + ' cutoff changed each year. A <span style="color:#16a34a;font-weight:600">falling</span> cutoff means admission became easier; a <span style="color:#dc2626;font-weight:600">rising</span> cutoff means it got harder.</p>';
+
+        if (trend && trend.status === 'success' && trend.years && trend.years.length > 0) {
+            var yearRows = trend.years;
+
+            // Find max cutoff for bar scaling
+            var maxVal = 0;
+            yearRows.forEach(function(yr) {
+                var v = yr.rounds[selectedRound];
+                if (v == null) { var ks = Object.keys(yr.rounds).map(Number); v = yr.rounds[ks[0]]; }
+                if (v && v > maxVal) maxVal = v;
+            });
+
+            html += '<div class="tp-year-table">';
+            html += '<div class="tp-year-header"><span>Year</span><span>Cutoff</span><span>Change</span></div>';
+
+            var prevVal = null;
+            yearRows.forEach(function(yr) {
+                var val = yr.rounds[selectedRound];
+                if (val == null) {
+                    var ks = Object.keys(yr.rounds).map(Number)
+                                   .sort(function(a,b){ return Math.abs(a-selectedRound)-Math.abs(b-selectedRound); });
+                    val = yr.rounds[ks[0]];
+                }
+                var barPct = maxVal > 0 ? Math.round((val / maxVal) * 100) : 0;
+                var diff = prevVal !== null ? (val - prevVal) : null;
+                var changeHtml, explanationNote;
+
+                if (diff === null) {
+                    changeHtml = '<span class="tp-same">—</span>';
+                    explanationNote = 'First year of data — no prior year to compare.';
+                } else if (diff > 0.09) {
+                    changeHtml = '<span class="tp-up">+' + diff.toFixed(2) + ' ↑</span>';
+                    explanationNote = 'Cutoff rose by ' + diff.toFixed(2) + ' pts — admission became harder compared to ' + (yr.year - 1) + '.';
+                } else if (diff < -0.09) {
+                    changeHtml = '<span class="tp-dn">' + diff.toFixed(2) + ' ↓</span>';
+                    explanationNote = 'Cutoff fell by ' + Math.abs(diff).toFixed(2) + ' pts — admission became easier compared to ' + (yr.year - 1) + '.';
+                } else {
+                    changeHtml = '<span class="tp-same">Stable</span>';
+                    explanationNote = 'Cutoff was nearly unchanged from ' + (yr.year - 1) + '.';
+                }
+
+                html += '<div class="tp-year-row">'
+                      + '<span class="tp-year-label">' + yr.year + '</span>'
+                      + '<span class="tp-year-val">'
+                      +   '<span class="tp-bar-wrap"><span class="tp-bar" style="width:' + barPct + '%"></span></span>'
+                      +   '<b>' + (val != null ? val.toFixed(2) : '—') + '</b>'
+                      + '</span>'
+                      + '<span>' + changeHtml + '</span>'
+                      + '</div>'
+                      + '<div class="tp-year-explain">' + explanationNote + '</div>';
+                prevVal = val;
+            });
+            html += '</div>';
+
+            // ── SECTION 2: Round-by-round within each year ────────────────
+            html += '<div class="tp-section-title" style="margin-top:24px">Round-by-Round Within Each Year</div>';
+            html += '<p class="tp-section-note">How the cutoff moves from Round 1 → 2 → 3 → 4 within the same year. A <span style="color:#16a34a;font-weight:600">negative</span> R1→Final means the cutoff dropped — later rounds were easier.</p>';
+
+            var allRnds = new Set();
+            yearRows.forEach(function(yr){ Object.keys(yr.rounds).forEach(function(r){ allRnds.add(parseInt(r)); }); });
+            allRnds = Array.from(allRnds).sort(function(a,b){return a-b;});
+
+            var gridStyle = 'grid-template-columns: 52px ' + allRnds.map(function(){ return '1fr'; }).join(' ') + ' 72px';
+
+            html += '<div class="tp-round-table">';
+            html += '<div class="tp-round-header" style="' + gridStyle + '">'
+                  + '<span>Year</span>'
+                  + allRnds.map(function(r){ return '<span>R' + r + '</span>'; }).join('')
+                  + '<span>R1→Final</span>'
+                  + '</div>';
+
+            yearRows.forEach(function(yr) {
+                html += '<div class="tp-round-row" style="' + gridStyle + '">';
+                html += '<span class="tp-year-label">' + yr.year + '</span>';
+                allRnds.forEach(function(r) {
+                    var v = yr.rounds[r];
+                    html += '<span>' + (v != null ? v.toFixed(2) : '<span style="color:#d1d5db">—</span>') + '</span>';
+                });
+                var drop = yr.r1_to_final_drop;
+                var dropHtml = drop == null ? '<span style="color:#d1d5db">—</span>'
+                    : drop < -0.09 ? '<span class="tp-dn">' + drop.toFixed(2) + '</span>'
+                    : drop >  0.09 ? '<span class="tp-up">+' + drop.toFixed(2) + '</span>'
+                    : '<span class="tp-same">~0</span>';
+                html += '<span>' + dropHtml + '</span></div>';
+            });
+            html += '</div>';
+
+            // Advice block
+            if (trend.advice && Math.abs(trend.avg_r1_to_final_drop) <= 15) {
+                var aCls = trend.avg_r1_to_final_drop < -0.5 ? 'tp-advice-good'
+                         : trend.avg_r1_to_final_drop >  0.5 ? 'tp-advice-warn'
+                         : 'tp-advice-stable';
+                html += '<div class="tp-advice ' + aCls + '">' + trend.advice + '</div>';
             }
 
-            // ── Round-trend badge (only show if drop is realistic: ≤15 pts) ─
-            if (trend && trend.status === 'success' && trend.avg_r1_to_final_drop !== undefined) {
-                var drop    = parseFloat(trend.avg_r1_to_final_drop);
-                var absDrop = Math.abs(drop);
-                var advice  = trend.advice || '';
-                // Sanity check: ignore unrealistic trends (>15 pts = bad data)
-                if (advice && absDrop <= 15.0) {
-                    var trendCls = drop < -0.5 ? 'rc-trend-good' :
-                                   drop >  0.5 ? 'rc-trend-warn' : 'rc-trend-stable';
-                    var trendIcon = drop < -0.5 ? '&#8675;' :
-                                    drop >  0.5 ? '&#8673;' : '&#8596;';
-                    html += '<div class="rc-trend-row ' + trendCls + '">'
-                          +   '<span class="rc-trend-icon">' + trendIcon + '</span>'
-                          +   '<span class="rc-trend-text">' + advice + '</span>'
-                          + '</div>';
+        } else {
+            html += '<div class="tp-no-data">No historical trend data found for this college + branch + category combination.</div>';
+        }
+
+        // ── SECTION 3: 2026 ML Prediction ────────────────────────────────
+        html += '<div class="tp-section-title" style="margin-top:26px">2026 Predicted Cutoff</div>';
+        html += '<p class="tp-section-note">Predicted by a LightGBM ML model trained on 2022–2025 data across all rounds. The actual cutoff may differ based on student pool and seat availability.</p>';
+
+        if (pred && pred.status === 'success') {
+            var pVal   = parseFloat(pred.predicted_2026);
+            var conf   = pred.confidence || 'Low';
+            var cCls   = conf === 'High' ? 'tp-conf-high' : conf === 'Medium' ? 'tp-conf-med' : 'tp-conf-low';
+            var dirTxt = pred.trend_direction === 'rising'  ? '↑ Rising trend'
+                       : pred.trend_direction === 'falling' ? '↓ Falling trend'
+                       : '↔ Stable trend';
+
+            // Explanation of what the prediction means for the student
+            var userPct   = parseFloat(sessionStorage.getItem('inputPercentile') || 0);
+            var predGap   = userPct > 0 ? (userPct - pVal) : null;
+            var predNote  = '';
+            if (predGap !== null) {
+                if (predGap >= 2) {
+                    predNote = 'Your percentile (' + userPct.toFixed(2) + ') is <strong>' + predGap.toFixed(2) + ' pts above</strong> the predicted 2026 cutoff — you are likely to qualify if this prediction holds.';
+                } else if (predGap >= 0) {
+                    predNote = 'Your percentile (' + userPct.toFixed(2) + ') is just <strong>' + predGap.toFixed(2) + ' pts above</strong> the predicted cutoff — admission is possible but borderline.';
+                } else {
+                    predNote = 'Your percentile (' + userPct.toFixed(2) + ') is <strong>' + Math.abs(predGap).toFixed(2) + ' pts below</strong> the predicted 2026 cutoff — admission may be difficult, but predictions are not guaranteed.';
                 }
             }
 
-            insightEl.innerHTML = html || '';
-        });
+            html += '<div class="tp-pred-box">'
+                  + '<div class="tp-pred-main">'
+                  +   '<span class="tp-pred-num">' + pVal.toFixed(2) + '</span>'
+                  +   '<span class="tp-pred-label">predicted percentile for 2026</span>'
+                  + '</div>'
+                  + '<div class="tp-pred-right">'
+                  +   '<span class="tp-pred-conf ' + cCls + '">Accuracy: ' + conf + '</span>'
+                  +   '<span class="tp-pred-dir">' + dirTxt + '</span>'
+                  +   '<span class="tp-pred-pts">Based on ' + (pred.data_points || '—') + ' data points</span>'
+                  + '</div>'
+                  + '</div>';
+
+            if (predNote) {
+                html += '<div class="tp-pred-note">' + predNote + '</div>';
+            }
+        } else {
+            html += '<div class="tp-no-data">No prediction available yet. Run <code>predict_2026.py</code> to generate predictions.</div>';
+        }
+
+        body.innerHTML = html;
     });
 }
+
+function closeTrendDrawer(e, force) {
+    if (force || (e && e.target === document.getElementById('trendDrawerOverlay'))) {
+        document.getElementById('trendDrawerOverlay').classList.remove('tp-open');
+        document.body.style.overflow = '';
+    }
+}
+
+// _loadInsights kept as no-op — insights now open via "Trend & Prediction" button
+function _loadInsights(grid) { /* no-op: use Trend & Prediction button per card */ }
 
 // ---------- SMART MIX: balanced distribution across High/Med/Low ----------
 function _smartMix(high, med, low, total) {
@@ -1906,17 +2046,20 @@ function displayResultsMetadata() {
     var percentile = sessionStorage.getItem('inputPercentile');
     var category   = sessionStorage.getItem('inputCategory') || 'OPEN';
     var city       = sessionStorage.getItem('inputCity')     || '';
+    var round      = sessionStorage.getItem('inputRound')    || '1';
 
     // Empty string means user selected All Maharashtra
     var cityLabel = (!city || city.trim() === '') ? 'All Maharashtra' : city;
 
-    var pctEl  = document.getElementById('rpcPctVal');
-    var catEl  = document.getElementById('rpcCatVal');
-    var cityEl = document.getElementById('rpcCityVal');
+    var pctEl   = document.getElementById('rpcPctVal');
+    var catEl   = document.getElementById('rpcCatVal');
+    var cityEl  = document.getElementById('rpcCityVal');
+    var roundEl = document.getElementById('rpcRoundVal');
 
-    if (pctEl)  pctEl.textContent  = percentile ? parseFloat(percentile).toFixed(2) : '—';
-    if (catEl)  catEl.textContent  = category || '—';
-    if (cityEl) cityEl.textContent = cityLabel;
+    if (pctEl)   pctEl.textContent   = percentile ? parseFloat(percentile).toFixed(2) : '—';
+    if (catEl)   catEl.textContent   = category || '—';
+    if (cityEl)  cityEl.textContent  = cityLabel;
+    if (roundEl) roundEl.textContent = 'Round ' + round;
 }
 
 // ---------- SCHOLARSHIP FORM VALIDATION ----------

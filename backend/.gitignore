@@ -1,7 +1,8 @@
+*.pdf
+*.csv
 __pycache__/
 *.pyc
+.env
 instance/
-*.db
-*.pdf
-*.bak
 venv/
+*.bak

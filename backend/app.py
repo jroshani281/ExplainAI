@@ -673,7 +673,7 @@ def _select_best_colleges(deduped, percentile, total=30):
     return result
 
 
-def _run_query(seat_types, pref_city, branches, college_types):
+def _run_query(seat_types, pref_city, branches, college_types, preferred_round=None):
     from sqlalchemy import or_
 
     # Determine which year to use
@@ -688,6 +688,17 @@ def _run_query(seat_types, pref_city, branches, college_types):
 
     if not available_rounds:
         return []
+
+    # If student selected a specific round, build the fallback order starting from that round.
+    # e.g. student selects Round 2 → try R2, then R1 (rounds before), then R3, R4 (rounds after).
+    # This ensures: (a) we use their chosen round when available for that college+branch,
+    # (b) we gracefully fall back so no college disappears just because Round 2 was skipped.
+    if preferred_round and preferred_round in available_rounds:
+        before = sorted([r for r in available_rounds if r <= preferred_round], reverse=True)
+        after  = sorted([r for r in available_rounds if r > preferred_round])
+        round_order = before + after   # e.g. [2, 1, 3, 4]
+    else:
+        round_order = available_rounds  # default: latest first
 
     # Base filters (city, branch, college type)
     def apply_filters(q):
@@ -721,12 +732,12 @@ def _run_query(seat_types, pref_city, branches, college_types):
         return q
 
     # SMART FALLBACK: for each (college, branch, seat_type) combination,
-    # use the latest round that has data for it.
+    # use the preferred round first; fall back to nearest available round.
     # This ensures VJ/NT/SC seats are never missing just because
     # they were fully filled in Round 1 and absent in Round 4.
     all_rows = {}  # key=(college_name, branch, seat_type) → row
 
-    for rnd in available_rounds:
+    for rnd in round_order:
         q = Cutoff.query.filter(
             Cutoff.year == use_year,
             Cutoff.round == rnd,
@@ -736,7 +747,7 @@ def _run_query(seat_types, pref_city, branches, college_types):
         for row in q.all():
             key = (row.college_name, row.branch, row.seat_type)
             if key not in all_rows:
-                # First time we see this combination = latest round that has it
+                # First time we see this combination = preferred round (or nearest fallback)
                 all_rows[key] = row
 
     return list(all_rows.values())
@@ -755,6 +766,12 @@ def recommend_colleges():
     branches      = data.get('branches', [])
     branch_labels = data.get('branchLabels', [])   # human-readable chip names for display
     college_types = data.get('collegeTypes', [])
+    preferred_round = data.get('round', None)
+    if preferred_round is not None:
+        try:
+            preferred_round = int(preferred_round)
+        except (TypeError, ValueError):
+            preferred_round = None
 
     if percentile is None:
         return jsonify({'status': 'error', 'error': 'percentile is required'}), 400
@@ -771,7 +788,7 @@ def recommend_colleges():
     all_seat_types = get_eligible_seat_types(category, gender) + ['TFWS']
 
     # ── Strict query: user's exact filters ───────────────────────────────────
-    rows_strict   = _run_query(all_seat_types, pref_city, branches, college_types)
+    rows_strict   = _run_query(all_seat_types, pref_city, branches, college_types, preferred_round)
     dedup_strict  = _deduplicate(rows_strict, percentile)
     eligible_strict = _count_eligible(dedup_strict, percentile)
     # Count unique colleges (not seat_type rows) for accurate CASE B trigger
@@ -783,7 +800,7 @@ def recommend_colleges():
 
     # If user set a college-type filter and got nothing, tell them why
     if user_set_type_filter and eligible_strict == 0:
-        rows_nb = _run_query(all_seat_types, pref_city, [], college_types)
+        rows_nb = _run_query(all_seat_types, pref_city, [], college_types, preferred_round)
         enb = _count_eligible(_deduplicate(rows_nb, percentile), percentile)
         if enb > 0:
             hint = (
@@ -792,7 +809,7 @@ def recommend_colleges():
             )
         else:
             # Check if the issue is percentile being too low vs no colleges of that type
-            rows_any_pct = _run_query(all_seat_types, pref_city, branches, college_types)
+            rows_any_pct = _run_query(all_seat_types, pref_city, branches, college_types, preferred_round)
             has_rows = len(rows_any_pct) > 0
             if has_rows:
                 hint = (
@@ -819,27 +836,9 @@ def recommend_colleges():
     CITY_MINIMUM   = 5    # min results before relaxing branch filter within a city
 
     if pref_city:
-        # City is a HARD filter — never override it.
-        #
-        # Branch logic (3 cases):
-        #
-        # CASE A — eligible_strict >= CITY_MINIMUM:
-        #   User's branch + city gave enough results. Show them as-is. ✅
-        #
-        # CASE B — 0 < eligible_strict < CITY_MINIMUM:
-        #   User's branch gave SOME results but fewer than minimum.
-        #   → Show user's matching results FIRST (they asked for these).
-        #   → Then append extra branches from the same city to fill up,
-        #     with a warning banner and "Not your branch" tags on extras.
-        #
-        # CASE C — eligible_strict == 0:
-        #   User's branch gave ZERO results in this city.
-        #   → Show "no results" with a clear helpful message.
-        #     Do NOT silently show wrong branches.
-
         if branches and unique_colleges_strict == 0:
             # CASE C: zero results for user's branch — tell them clearly
-            rows_city_any_branch = _run_query(all_seat_types, pref_city, [], college_types)
+            rows_city_any_branch = _run_query(all_seat_types, pref_city, [], college_types, preferred_round)
             dedup_city_any       = _deduplicate(rows_city_any_branch, percentile)
             city_any_count       = _count_eligible(dedup_city_any, percentile)
             branch_names         = ', '.join(branches[:3]) + ('...' if len(branches) > 3 else '')
@@ -860,8 +859,7 @@ def recommend_colleges():
 
         elif branches and 0 < unique_colleges_strict < CITY_MINIMUM:
             # CASE B: fewer unique colleges than minimum — pad with other branches.
-            # Show user's own matches first, then pad with other branches.
-            rows_city_any_branch = _run_query(all_seat_types, pref_city, [], college_types)
+            rows_city_any_branch = _run_query(all_seat_types, pref_city, [], college_types, preferred_round)
             dedup_city_any       = _deduplicate(rows_city_any_branch, percentile)
 
             # Build merged list: user's matches first, then extras (different branch)
@@ -877,9 +875,6 @@ def recommend_colleges():
             # Use human-readable chip labels if available, fall back to raw branch names
             display_names  = branch_labels if branch_labels else branches
             branch_names   = ', '.join(display_names[:3]) + ('...' if len(display_names) > 3 else '')
-            # Count what _select_best_colleges will ACTUALLY show as user-branch cards.
-            # Run selection on ONLY the user's branch matches (dedup_strict) to get
-            # the real number — this matches exactly what appears in the results list.
             user_branch_results = _select_best_colleges(list(dedup_strict), percentile, total=30)
             cards_shown = len(user_branch_results)
             filter_note = (
@@ -902,8 +897,8 @@ def recommend_colleges():
             relaxed     = False
 
             for lvl_args in [
-                (all_seat_types, '', branches, []),
-                (all_seat_types, '', [],       []),
+                (all_seat_types, '', branches, [], preferred_round),
+                (all_seat_types, '', [],       [], preferred_round),
             ]:
                 if _count_eligible(merged, percentile) >= MINIMUM_NEEDED:
                     break
@@ -911,6 +906,9 @@ def recommend_colleges():
                     key = (c.college_name, c.branch)
                     if key not in merged_keys and c.closing_percentile > 0 \
                             and (percentile - c.closing_percentile) >= -15:
+                        merged.append(c)
+                        merged_keys.add(key)
+                        relaxed = True
                         merged.append(c)
                         merged_keys.add(key)
                         relaxed = True
@@ -967,7 +965,8 @@ def recommend_colleges():
         'total': len(results),
         'data': results,
         'filter_note':    filter_note,
-        'branch_relaxed': branch_relaxed
+        'branch_relaxed': branch_relaxed,
+        'round_used':     preferred_round or 1
     })
 
 
@@ -1171,16 +1170,25 @@ class CutoffPrediction(db.Model):
 def predict_2026():
     """
     GET /api/predict/2026?college=COEP&branch=Computer&seat_type=GOPENS
-    Returns predicted 2026 cutoff + historical trend for a specific college+branch+seat.
+
+    Returns predicted 2026 cutoff + full historical trend for the modal.
+
+    FIXED:
+    - Historical trend now uses ROUND-1 cutoff per year so students see
+      the same round they are applying in (Round 1 card).
+    - trend_direction is computed from R1-only values across years.
+    - confidence label thresholds match new predict_2026.py (8/4 pts).
+    - data_points reflects ALL rounds × ALL years (up to ~12).
     """
     college   = request.args.get('college', '').strip()
     branch    = request.args.get('branch', '').strip()
     seat_type = request.args.get('seat_type', '').strip()
 
     if not college or not branch or not seat_type:
-        return jsonify({'status': 'error', 'error': 'college, branch, seat_type are required'}), 400
+        return jsonify({'status': 'error',
+                        'error': 'college, branch, seat_type are required'}), 400
 
-    # Get prediction
+    # ── Fetch prediction from DB ───────────────────────────────────────────────
     pred = CutoffPrediction.query.filter(
         CutoffPrediction.college_name.ilike(f'%{college}%'),
         CutoffPrediction.branch.ilike(f'%{branch}%'),
@@ -1188,8 +1196,7 @@ def predict_2026():
         CutoffPrediction.predicted_year == 2026
     ).first()
 
-    # Get historical trend (2022-2025) for the chart
-    from sqlalchemy import and_
+    # ── Fetch all historical rows for this combo (all rounds, all years) ──────
     history = Cutoff.query.filter(
         Cutoff.college_name.ilike(f'%{college}%'),
         Cutoff.branch.ilike(f'%{branch}%'),
@@ -1197,44 +1204,84 @@ def predict_2026():
         Cutoff.year.between(2022, 2025)
     ).order_by(Cutoff.year, Cutoff.round).all()
 
-    # Build per-year closing cutoff (highest round per year)
-    yearly = {}
+    # ── Build per-year structure ───────────────────────────────────────────────
+    # yearly_rounds[year][round] = closing_percentile
+    yearly_rounds = {}
     for row in history:
-        key = row.year
-        if key not in yearly or row.round > yearly[key]['round']:
-            yearly[key] = {'year': row.year, 'cutoff': row.closing_percentile, 'round': row.round}
+        yr = row.year
+        rnd = row.round
+        if yr not in yearly_rounds:
+            yearly_rounds[yr] = {}
+        yearly_rounds[yr][rnd] = round(row.closing_percentile, 2)
 
-    trend_data = sorted(yearly.values(), key=lambda x: x['year'])
+    # For the trend chart: use Round-1 cutoff per year.
+    # If a year has no R1 data, fall back to the lowest available round.
+    trend_data = []
+    for yr in sorted(yearly_rounds.keys()):
+        rounds = yearly_rounds[yr]
+        if not rounds:
+            continue
+        r1_val = rounds.get(1) or rounds.get(min(rounds.keys()))
+        final_val = rounds.get(max(rounds.keys()))
+        trend_data.append({
+            'year':        yr,
+            'cutoff':      r1_val,          # R1 cutoff — what this round shows
+            'final_cutoff': final_val,      # final round cutoff (extra context)
+            'rounds':      rounds,          # all rounds for the round-by-round table
+        })
 
-    # Compute year-over-year change
+    # ── Trend direction (from R1 values year-over-year) ───────────────────────
     trend_direction = 'stable'
-    if len(trend_data) >= 2:
-        recent_change = trend_data[-1]['cutoff'] - trend_data[-2]['cutoff']
+    r1_values = [d['cutoff'] for d in trend_data if d['cutoff'] is not None]
+    if len(r1_values) >= 2:
+        # Use slope of last 2 R1 values
+        recent_change = r1_values[-1] - r1_values[-2]
         if recent_change > 1.0:
             trend_direction = 'rising'
         elif recent_change < -1.0:
             trend_direction = 'falling'
 
+    # ── Confidence label (human-readable) ─────────────────────────────────────
+    # Thresholds: High=8+ data points, Medium=4+, Low<4
+    # data_points in DB now counts all rounds × all years (fixed in predict_2026.py)
+    def confidence_label(dp):
+        if dp is None:
+            return 'Low'
+        if dp >= 8:
+            return 'High'
+        if dp >= 4:
+            return 'Medium'
+        return 'Low'
+
     if not pred:
         return jsonify({
-            'status': 'no_prediction',
-            'message': 'No prediction available for this combination',
-            'trend': [{'year': d['year'], 'cutoff': d['cutoff']} for d in trend_data],
-            'trend_direction': trend_direction
+            'status':          'no_prediction',
+            'message':         'No 2026 prediction available — run predict_2026.py first',
+            'trend':           [{'year': d['year'], 'cutoff': d['cutoff'],
+                                  'rounds': d['rounds']} for d in trend_data],
+            'trend_direction': trend_direction,
+            'years_of_data':   len(trend_data),
         })
 
     return jsonify({
-        'status': 'success',
-        'college_name':         pred.college_name,
-        'branch':               pred.branch,
-        'seat_type':            pred.seat_type,
-        'predicted_2026':       round(pred.predicted_percentile, 2),
-        'confidence':           pred.confidence,
-        'data_points':          pred.data_points,
-        'trend_direction':      trend_direction,
-        'trend': [{'year': d['year'], 'cutoff': d['cutoff']} for d in trend_data] + [
-            {'year': 2026, 'cutoff': round(pred.predicted_percentile, 2), 'predicted': True}
-        ]
+        'status':           'success',
+        'college_name':     pred.college_name,
+        'branch':           pred.branch,
+        'seat_type':        pred.seat_type,
+        'predicted_2026':   round(pred.predicted_percentile, 2),
+        'confidence':       confidence_label(pred.data_points),
+        'data_points':      pred.data_points,
+        'years_of_data':    len(trend_data),
+        'trend_direction':  trend_direction,
+        # Trend array: historical R1 cutoffs + 2026 prediction
+        'trend': [
+            {'year': d['year'], 'cutoff': d['cutoff'],
+             'final_cutoff': d['final_cutoff'], 'rounds': d['rounds']}
+            for d in trend_data
+        ] + [
+            {'year': 2026, 'cutoff': round(pred.predicted_percentile, 2),
+             'predicted': True}
+        ],
     })
 
 
@@ -1244,8 +1291,16 @@ def predict_2026():
 def round_trend():
     """
     GET /api/trend/rounds?college=COEP&branch=Computer&seat_type=GOPENS
-    Shows how cutoff changes from Round 1 → Round 2 → Round 3 across years.
-    Unique insight: "This college drops 2.4 pts between R1 and R3 on average"
+
+    Shows how cutoff moves across R1→R2→R3→R4 within each year, PLUS
+    the year-over-year R1 trend.
+
+    FIXED / ENHANCED:
+    - Returns round_count per year (how many rounds of data we have).
+    - Returns r1_trend array: R1 cutoff per year — lets frontend chart
+      same-round year-over-year movement cleanly.
+    - avg_r1_to_final_drop is now the mean of all available years,
+      not just the most recent year.
     """
     college   = request.args.get('college', '').strip()
     branch    = request.args.get('branch', '').strip()
@@ -1258,49 +1313,65 @@ def round_trend():
         Cutoff.year.between(2022, 2025)
     ).order_by(Cutoff.year, Cutoff.round).all()
 
-    # Group by year → round
+    # Build data[year][round] = cutoff
     data = {}
     for r in rows:
         yr = r.year
         if yr not in data:
             data[yr] = {}
-        data[yr][r.round] = r.closing_percentile
+        data[yr][r.round] = round(r.closing_percentile, 2)
 
     result = []
-    r1_to_r3_drops = []
+    r1_to_final_drops = []
+    r1_trend = []          # NEW: R1 cutoff per year for year-over-year chart
+
     for yr in sorted(data.keys()):
         rounds = data[yr]
-        r1 = rounds.get(1)
-        r3 = rounds.get(3) or rounds.get(max(rounds.keys()))
-        entry = {'year': yr, 'rounds': rounds}
-        if r1 and r3:
-            drop = r3 - r1
-            entry['r1_to_final_drop'] = round(drop, 2)
-            r1_to_r3_drops.append(drop)
+        r1     = rounds.get(1)
+        final_round_num = max(rounds.keys())
+        r_final = rounds.get(final_round_num)
+
+        entry = {
+            'year':        yr,
+            'rounds':      rounds,
+            'round_count': len(rounds),   # NEW: how many rounds exist this year
+        }
+
+        if r1 is not None:
+            r1_trend.append({'year': yr, 'r1_cutoff': r1})
+
+        if r1 is not None and r_final is not None:
+            drop = round(r_final - r1, 2)
+            entry['r1_to_final_drop'] = drop
+            r1_to_final_drops.append(drop)
+
         result.append(entry)
 
-    avg_drop = round(sum(r1_to_r3_drops) / len(r1_to_r3_drops), 2) if r1_to_r3_drops else 0
+    avg_drop = (round(sum(r1_to_final_drops) / len(r1_to_final_drops), 2)
+                if r1_to_final_drops else 0)
+    abs_avg  = abs(avg_drop)
 
-    advice = ''
-    abs_avg = abs(avg_drop)
-    # Sanity: ignore advice if avg drop > 15 pts (bad/sparse data)
+    # Advice: ignore unreasonably large drops (data anomaly)
     if abs_avg > 15.0:
-        advice = 'Cutoff is stable across rounds — apply in any round.'
+        advice = 'Cutoff data shows high variance — treat Round 1 as your benchmark.'
     elif avg_drop < -1.0:
-        advice = f'Cutoff drops avg {abs_avg:.1f} pts from Round 1 to final — if you miss Round 1, apply in Round 2.'
+        advice = (f'Cutoff drops avg {abs_avg:.1f} pts from Round 1 to final — '
+                  f'if you miss Round 1, applying in Round 2 is still viable.')
     elif avg_drop > 1.0:
-        advice = f'Cutoff rises avg {abs_avg:.1f} pts from Round 1 to final — Round 1 is your best chance.'
+        advice = (f'Cutoff rises avg {abs_avg:.1f} pts from Round 1 to final — '
+                  f'Round 1 is your best chance to secure admission.')
     else:
-        advice = 'Cutoff is stable across rounds — apply in any round.'
+        advice = 'Cutoff is stable across rounds — any round gives a fair chance.'
 
     return jsonify({
-        'status':    'success',
-        'college':   college,
-        'branch':    branch,
-        'seat_type': seat_type,
-        'years':     result,
+        'status':               'success',
+        'college':              college,
+        'branch':               branch,
+        'seat_type':            seat_type,
+        'years':                result,
+        'r1_trend':             r1_trend,      # NEW: clean R1 year-over-year array
         'avg_r1_to_final_drop': avg_drop,
-        'advice':    advice
+        'advice':               advice,
     })
 
 

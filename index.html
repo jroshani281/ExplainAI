@@ -85,6 +85,25 @@
                 </div>
             </div>
 
+            <!-- Round Selector -->
+            <div class="cc-field cc-round-field">
+                <label class="cc-label">Which CAP Round are you applying for?</label>
+                <div class="cc-round-chips" id="round-chips">
+                    <div class="cc-round-chip cc-round-selected" data-round="1" onclick="selectRoundChip(this)">
+                        <span class="cc-round-num">Round 1</span>
+                    </div>
+                    <div class="cc-round-chip" data-round="2" onclick="selectRoundChip(this)">
+                        <span class="cc-round-num">Round 2</span>
+                    </div>
+                    <div class="cc-round-chip" data-round="3" onclick="selectRoundChip(this)">
+                        <span class="cc-round-num">Round 3</span>
+                    </div>
+                    <div class="cc-round-chip" data-round="4" onclick="selectRoundChip(this)">
+                        <span class="cc-round-num">Round 4</span>
+                    </div>
+                </div>
+            </div>
+
             <div class="cc-two-col">
                 <div class="cc-field">
                     <label class="cc-label" for="category">Reservation Category</label>
@@ -302,6 +321,10 @@
                         <span class="rpc-label">City</span>
                         <span class="rpc-value" id="rpcCityVal">—</span>
                     </div>
+                    <div class="rpc-item">
+                        <span class="rpc-label">Round</span>
+                        <span class="rpc-value" id="rpcRoundVal">—</span>
+                    </div>
                 </div>
                 <h1 class="res-count-title" id="resultsCount">Finding colleges…</h1>
                 <!-- Chance summary pills -->
@@ -372,6 +395,20 @@
                 <div class="res-scholar-sub">Based on your category — you may get full tuition coverage through NSP or MahaDBT.</div>
             </div>
             <button class="btn-primary" onclick="showPage('scholarship')">Find Scholarships </button>
+        </div>
+    </div>
+</div>
+
+<!-- ==================== TREND & PREDICTION DRAWER ==================== -->
+<div id="trendDrawerOverlay" class="tp-overlay" onclick="closeTrendDrawer(event)">
+    <div class="tp-drawer" id="trendDrawer">
+        <div class="tp-drawer-header">
+            <div class="tp-drawer-title">Cutoff Trend &amp; 2026 Prediction</div>
+            <button class="tp-close-btn" onclick="closeTrendDrawer(null, true)" aria-label="Close">&#x2715;</button>
+        </div>
+        <div class="tp-drawer-meta" id="tpMeta"></div>
+        <div class="tp-drawer-body" id="tpBody">
+            <div class="tp-loading">Loading trend data…</div>
         </div>
     </div>
 </div>
